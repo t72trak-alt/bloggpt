@@ -1,6 +1,6 @@
 """
-FastAPI приложение для генерации блог-постов на основе актуальных новостей
-Интегрирует OpenAI API и Currents API для создания контента
+FastAPI приложение для генерации блог-постов и отправки в Telegram
+Интегрирует OpenAI API, Currents API и Telegram Bot API
 """
 
 import os
@@ -23,9 +23,9 @@ logger = logging.getLogger(__name__)
 
 # Инициализация FastAPI приложения
 app = FastAPI(
-    title="Blog Post Generator API",
-    description="API для генерации блог-постов на основе актуальных новостей",
-    version="1.0.0",
+    title="Blog Post Generator & Telegram Bot API",
+    description="API для генерации блог-постов на основе актуальных новостей и отправки в Telegram",
+    version="1.1.0",
     docs_url="/docs",
     redoc_url="/redoc"
 )
@@ -33,6 +33,8 @@ app = FastAPI(
 # Получение API ключей из переменных окружения
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 CURRENTS_API_KEY = os.getenv("CURRENTS_API_KEY")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 # Валидация наличия обязательных API ключей
@@ -47,7 +49,7 @@ if not CURRENTS_API_KEY:
 # Настройка OpenAI
 openai.api_key = OPENAI_API_KEY
 
-# Модели данных Pydantic
+# Модели данных Pydantic (добавляем Telegram модели)
 class TopicRequest(BaseModel):
     """Модель запроса для генерации поста"""
     topic: str = Field(
@@ -65,6 +67,23 @@ class TopicRequest(BaseModel):
         ge=1,
         le=20,
         description="Максимальное количество новостей для использования (по умолчанию: 5)"
+    )
+
+class TelegramPost(BaseModel):
+    """Модель запроса для отправки в Telegram"""
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=4096,
+        description="Текст сообщения для отправки в Telegram"
+    )
+    image_url: Optional[str] = Field(
+        None,
+        description="URL изображения для отправки (опционально)"
+    )
+    parse_mode: Optional[str] = Field(
+        "HTML",
+        description="Режим разметки: 'HTML' или 'Markdown'"
     )
 
 class NewsArticle(BaseModel):
@@ -90,7 +109,92 @@ class HealthCheck(BaseModel):
     timestamp: str
     services: Dict[str, str]
 
-# Функция для получения актуальных новостей через Currents API
+class TelegramSendResponse(BaseModel):
+    """Модель ответа отправки в Telegram"""
+    status: str
+    message: Optional[str] = None
+    telegram_response: Optional[Dict] = None
+    error: Optional[str] = None
+
+# ================== ФУНКЦИИ ДЛЯ TELEGRAM ==================
+
+def send_to_telegram_bot(
+    message: str, 
+    image_url: Optional[str] = None,
+    parse_mode: str = "HTML"
+) -> Dict:
+    """
+    Отправляет сообщение в Telegram чат/канал
+    
+    Args:
+        message: Текст сообщения
+        image_url: URL изображения (опционально)
+        parse_mode: Режим разметки ('HTML' или 'Markdown')
+        
+    Returns:
+        Ответ Telegram API
+        
+    Raises:
+        HTTPException: Если произошла ошибка при отправке
+    """
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Telegram credentials not configured"
+        )
+    
+    try:
+        # Если есть изображение
+        if image_url:
+            photo_data = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "photo": image_url,
+                "caption": message[:1024] if message else "",  # ограничение Telegram
+                "parse_mode": parse_mode
+            }
+            response = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto",
+                json=photo_data,
+                timeout=10
+            )
+        # Если только текст
+        else:
+            text_data = {
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
+                "parse_mode": parse_mode
+            }
+            response = requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json=text_data,
+                timeout=10
+            )
+        
+        response.raise_for_status()
+        return response.json()
+        
+    except requests.exceptions.Timeout:
+        logger.error("Таймаут при отправке в Telegram")
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Таймаут при отправке сообщения в Telegram"
+        )
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Ошибка при отправке в Telegram: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Ошибка Telegram API: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при отправке в Telegram: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка отправки в Telegram: {str(e)}"
+        )
+
+# ================== СУЩЕСТВУЮЩИЕ ФУНКЦИИ ==================
+# (get_recent_news, generate_content - остаются без изменений)
+
 def get_recent_news(
     topic: str, 
     language: str = "en", 
@@ -98,17 +202,6 @@ def get_recent_news(
 ) -> List[NewsArticle]:
     """
     Получает последние новости по заданной теме через Currents API
-    
-    Args:
-        topic: Тема для поиска новостей
-        language: Язык новостей (по умолчанию: 'en')
-        max_items: Максимальное количество новостей
-        
-    Returns:
-        Список новостных статей
-        
-    Raises:
-        HTTPException: Если произошла ошибка при получении новостей
     """
     url = "https://api.currentsapi.services/v1/latest-news"
     
@@ -162,20 +255,9 @@ def get_recent_news(
             detail=f"Ошибка обработки новостей: {str(e)}"
         )
 
-# Функция для генерации контента с использованием OpenAI
 def generate_content(topic: str, news_articles: List[NewsArticle]) -> Dict[str, str]:
     """
     Генерирует контент для блог-поста на основе темы и новостей
-    
-    Args:
-        topic: Тема поста
-        news_articles: Список новостных статей для контекста
-        
-    Returns:
-        Словарь с заголовком, мета-описанием и содержимым поста
-        
-    Raises:
-        HTTPException: Если произошла ошибка при генерации контента
     """
     # Формирование контекста из новостей
     news_context = "\n".join(
@@ -270,7 +352,8 @@ def generate_content(topic: str, news_articles: List[NewsArticle]) -> Dict[str, 
             detail=f"Ошибка при генерации контента: {str(e)}"
         )
 
-# Эндпоинты API
+# ================== ЭНДПОИНТЫ ==================
+
 @app.post(
     "/generate-post",
     response_model=GeneratedPost,
@@ -281,12 +364,6 @@ def generate_content(topic: str, news_articles: List[NewsArticle]) -> Dict[str, 
 async def generate_post_api(request: TopicRequest):
     """
     Основной эндпоинт для генерации блог-поста
-    
-    Args:
-        request: Объект запроса с темой и параметрами
-        
-    Returns:
-        Сгенерированный пост с метаданными
     """
     try:
         logger.info(f"Запрос на генерацию поста по теме: {request.topic}")
@@ -315,7 +392,6 @@ async def generate_post_api(request: TopicRequest):
         return generated_post
         
     except HTTPException:
-        # Пробрасываем уже обработанные HTTP исключения
         raise
     except Exception as e:
         logger.error(f"Необработанная ошибка в generate-post: {str(e)}")
@@ -324,13 +400,88 @@ async def generate_post_api(request: TopicRequest):
             detail=f"Внутренняя ошибка сервера: {str(e)}"
         )
 
+@app.post(
+    "/send-to-telegram",
+    response_model=TelegramSendResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Отправить сообщение в Telegram",
+    description="Отправляет текстовое сообщение или сообщение с изображением в Telegram чат/канал"
+)
+async def send_to_telegram_api(post: TelegramPost):
+    """
+    Эндпоинт для отправки сообщений в Telegram
+    """
+    try:
+        logger.info(f"Запрос на отправку в Telegram: {len(post.message)} символов")
+        
+        telegram_response = send_to_telegram_bot(
+            message=post.message,
+            image_url=post.image_url,
+            parse_mode=post.parse_mode
+        )
+        
+        return TelegramSendResponse(
+            status="success",
+            message="Сообщение успешно отправлено в Telegram",
+            telegram_response=telegram_response
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Ошибка в send-to-telegram: {str(e)}")
+        return TelegramSendResponse(
+            status="error",
+            error=str(e)
+        )
+
+@app.post(
+    "/generate-and-send",
+    status_code=status.HTTP_201_CREATED,
+    summary="Сгенерировать и отправить в Telegram",
+    description="Генерирует блог-пост и сразу отправляет его в Telegram"
+)
+async def generate_and_send_api(request: TopicRequest):
+    """
+    Комбинированный эндпоинт: генерирует пост и отправляет в Telegram
+    """
+    try:
+        # Генерация поста
+        generated_post = await generate_post_api(request)
+        
+        # Формирование сообщения для Telegram
+        telegram_message = (
+            f"<b>{generated_post.title}</b>\n\n"
+            f"{generated_post.post_content[:1000]}...\n\n"
+            f"📊 <i>Сгенерировано с использованием {generated_post.model_used}</i>"
+        )
+        
+        # Отправка в Telegram
+        telegram_response = send_to_telegram_bot(
+            message=telegram_message,
+            parse_mode="HTML"
+        )
+        
+        return {
+            "generated_post": generated_post,
+            "telegram_sent": True,
+            "telegram_response": telegram_response
+        }
+        
+    except Exception as e:
+        logger.error(f"Ошибка в generate-and-send: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Ошибка при генерации и отправке: {str(e)}"
+        )
+
 @app.get(
     "/health",
     response_model=HealthCheck,
     summary="Проверка здоровья сервиса",
     description="Проверяет статус работы всех компонентов сервиса"
 )
-async def health_check():
+async def health_check_api():
     """
     Эндпоинт для проверки работоспособности сервиса и внешних API
     """
@@ -359,8 +510,26 @@ async def health_check():
         logger.warning(f"Currents API недоступен: {str(e)}")
         services_status["currentsapi"] = "unhealthy"
     
+    # Проверка Telegram Bot API
+    try:
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            test_telegram = requests.get(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getMe",
+                timeout=5
+            )
+            if test_telegram.status_code == 200:
+                services_status["telegram_bot"] = "healthy"
+            else:
+                services_status["telegram_bot"] = "unhealthy"
+        else:
+            services_status["telegram_bot"] = "not_configured"
+    except Exception as e:
+        logger.warning(f"Telegram Bot API недоступен: {str(e)}")
+        services_status["telegram_bot"] = "unhealthy"
+    
     overall_status = "healthy" if all(
-        status == "healthy" for status in services_status.values()
+        status == "healthy" for status in services_status.values() 
+        if status != "not_configured"
     ) else "degraded"
     
     return HealthCheck(
@@ -374,16 +543,18 @@ async def health_check():
     summary="Корневой эндпоинт",
     description="Информация о сервисе и доступные эндпоинты"
 )
-async def root():
+async def root_api():
     """
     Корневой эндпоинт с информацией о сервисе
     """
     return {
-        "service": "Blog Post Generator API",
-        "version": "1.0.0",
-        "description": "Сервис для генерации блог-постов на основе актуальных новостей",
+        "service": "Blog Post Generator & Telegram Bot API",
+        "version": "1.1.0",
+        "description": "Сервис для генерации блог-постов и отправки в Telegram",
         "endpoints": {
             "POST /generate-post": "Генерация блог-поста по теме",
+            "POST /send-to-telegram": "Отправка сообщения в Telegram",
+            "POST /generate-and-send": "Генерация поста и отправка в Telegram",
             "GET /health": "Проверка здоровья сервиса",
             "GET /docs": "Документация Swagger",
             "GET /redoc": "Альтернативная документация"
@@ -410,7 +581,6 @@ async def global_exception_handler(request, exc):
 
 # Точка входа для запуска приложения
 if __name__ == "__main__":
-    # Получение параметров запуска из переменных окружения
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", 8000))
     reload = os.getenv("RELOAD", "false").lower() == "true"
@@ -418,7 +588,6 @@ if __name__ == "__main__":
     logger.info(f"Запуск сервера на {host}:{port}")
     logger.info(f"Документация доступна по адресу: http://{host}:{port}/docs")
     
-    # Запуск сервера
     uvicorn.run(
         "app:app",
         host=host,
