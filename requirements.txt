@@ -1,7 +1,5 @@
-fastapi
-uvicorn
-pydantic
-openai==0.27.0
-requests
-httpx
-tiktoken
+fastapi>=0.104.0
+uvicorn>=0.24.0
+openai>=0.28.0
+requests>=2.31.0
+pydantic>=2.5.0
