@@ -2,7 +2,7 @@
 fastapi>=0.104.0
 uvicorn>=0.24.0
 
-# OpenAI SDK (используем более новую версию, так как в коде используется openai.ChatCompletion)
+# OpenAI SDK
 openai>=1.0.0
 
 # HTTP запросы (для Currents API и Telegram API)
