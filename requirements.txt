@@ -1,5 +1,12 @@
+# FastAPI и зависимости
 fastapi>=0.104.0
 uvicorn>=0.24.0
-openai>=0.28.0
+
+# OpenAI SDK (используем более новую версию, так как в коде используется openai.ChatCompletion)
+openai>=1.0.0
+
+# HTTP запросы (для Currents API и Telegram API)
 requests>=2.31.0
+
+# Валидация данных
 pydantic>=2.5.0
